@@ -1,0 +1,126 @@
+# =============================================================================
+# Postiz Stack for Docker Swarm (Traefik)
+# =============================================================================
+# URL: https://postiz.vps.andrejvysny.sk/
+#
+# Deploy:
+#   docker stack deploy -c services/postiz-stack.yml postiz
+# =============================================================================
+
+services:
+  app:
+    image: ghcr.io/gitroomhq/postiz-app:latest
+    networks:
+      - vps-public
+      - postiz-internal
+    environment:
+      # === Required Settings
+      MAIN_URL: "https://postiz.vps.andrejvysny.sk"
+      FRONTEND_URL: "https://postiz.vps.andrejvysny.sk"
+      NEXT_PUBLIC_BACKEND_URL: "https://postiz.vps.andrejvysny.sk/api"
+      JWT_SECRET: "03c88315a80c78496e5ad10b6c0f64409075a0a7530f58129a7c60577960b96f"
+
+      DATABASE_URL: "postgresql://postiz-user:yCi7fAP18z/ZrGYVzZvYZYS3oIr7oG5x@postiz_postgres:5432/postiz-db"
+      REDIS_URL: "redis://postiz_redis:6379"
+
+      # Docs default; leave as-is unless Postiz complains
+      BACKEND_INTERNAL_URL: "http://localhost:3000"
+
+      # Behaviour
+      IS_GENERAL: "true"
+      DISABLE_REGISTRATION: "false"
+      RUN_CRON: "true"
+
+      # Storage (local)
+      STORAGE_PROVIDER: "local"
+      UPLOAD_DIRECTORY: "/uploads"
+      NEXT_PUBLIC_UPLOAD_DIRECTORY: "/uploads"
+
+    volumes:
+      - postiz-config:/config/
+      - postiz-uploads:/uploads/
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.postiz.rule=Host(`postiz.vps.andrejvysny.sk`)"
+        - "traefik.http.routers.postiz.entrypoints=websecure"
+        - "traefik.http.routers.postiz.tls=true"
+        - "traefik.http.routers.postiz.tls.certresolver=letsencrypt"
+        - "traefik.http.services.postiz.loadbalancer.server.port=5000"
+
+  postgres:
+    image: postgres:17-alpine
+    networks:
+      - postiz-internal
+    environment:
+      POSTGRES_USER: "postiz-user"
+      POSTGRES_PASSWORD: "yCi7fAP18z/ZrGYVzZvYZYS3oIr7oG5x"
+      POSTGRES_DB: "postiz-db"
+    volumes:
+      - postiz-postgres-data:/var/lib/postgresql/data
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      restart_policy:
+        condition: on-failure
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postiz-user -d postiz-db"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7.2
+    networks:
+      - postiz-internal
+    volumes:
+      - postiz-redis-data:/data
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      restart_policy:
+        condition: on-failure
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+networks:
+  vps-public:
+    external: true
+  postiz-internal:
+    driver: overlay
+
+volumes:
+  postiz-postgres-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/data/postiz/pg
+  postiz-redis-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/data/postiz/redis
+  postiz-uploads:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/data/postiz/uploads
+  postiz-config:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/data/postiz/config

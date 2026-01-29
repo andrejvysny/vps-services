@@ -1,0 +1,259 @@
+name: services
+services:
+  n8n:
+    deploy:
+      replicas: 1
+      labels:
+        traefik.enable: "true"
+        traefik.http.routers.n8n.entrypoints: websecure
+        traefik.http.routers.n8n.rule: Host(`n8n.vps.andrejvysny.sk`)
+        traefik.http.routers.n8n.tls: "true"
+        traefik.http.routers.n8n.tls.certresolver: letsencrypt
+        traefik.http.services.n8n.loadbalancer.server.port: "5678"
+      restart_policy:
+        condition: on-failure
+    environment:
+      DB_POSTGRESDB_DATABASE: n8n
+      DB_POSTGRESDB_HOST: services-stack_postgres
+      DB_POSTGRESDB_PASSWORD: tZzcNKTDVduEL3j6PlO8qkrQBIxR6Chj
+      DB_POSTGRESDB_PORT: "5432"
+      DB_POSTGRESDB_USER: n8n
+      DB_TYPE: postgresdb
+      GENERIC_TIMEZONE: Europe/Bratislava
+      N8N_ENCRYPTION_KEY: +343HSkv4MZoBkSwjfgDaL0vcc9Ly0BWoWR5SkSNwis=
+      N8N_HOST: n8n.vps.andrejvysny.sk
+      N8N_PORT: "5678"
+      N8N_PROTOCOL: https
+      NODE_ENV: production
+      WEBHOOK_URL: https://n8n.vps.andrejvysny.sk/
+    image: docker.n8n.io/n8nio/n8n:latest
+    networks:
+      db-internal: null
+      vps-public: null
+    volumes:
+      - type: volume
+        source: n8n-data
+        target: /home/node/.n8n
+        volume: {}
+  postgres:
+    configs:
+      - source: pg-init
+        target: /docker-entrypoint-initdb.d/01-init.sh
+        mode: "0555"
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+      placement:
+        constraints:
+          - node.role == manager
+    environment:
+      N8N_DB_PASSWORD: tZzcNKTDVduEL3j6PlO8qkrQBIxR6Chj
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD: nkzCzIEJZzJlpOAJ3nIs7J3YXszWlmmn
+      POSTGRES_USER: postgres
+      POSTIZ_DB_PASSWORD: YLwzO2IreZ68mssXzGTF6Ep09xXdZJFy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U postgres -d postgres
+      timeout: 3s
+      interval: 10s
+      retries: 10
+    image: postgres:17-alpine
+    networks:
+      db-internal: null
+    volumes:
+      - type: volume
+        source: postgres-data
+        target: /var/lib/postgresql/data
+        volume: {}
+  postiz:
+    deploy:
+      replicas: 1
+      labels:
+        traefik.enable: "true"
+        traefik.http.routers.postiz.entrypoints: websecure
+        traefik.http.routers.postiz.rule: Host(`postiz.vps.andrejvysny.sk`)
+        traefik.http.routers.postiz.tls: "true"
+        traefik.http.routers.postiz.tls.certresolver: letsencrypt
+        traefik.http.services.postiz.loadbalancer.server.port: "5000"
+      restart_policy:
+        condition: on-failure
+    environment:
+      BACKEND_INTERNAL_URL: http://localhost:3000
+      DATABASE_URL: postgresql://postiz:YLwzO2IreZ68mssXzGTF6Ep09xXdZJFy@services-stack_postgres:5432/postiz
+      DISABLE_REGISTRATION: "false"
+      FRONTEND_URL: https://postiz.vps.andrejvysny.sk
+      IS_GENERAL: "true"
+      JWT_SECRET: RSdK0L7hORX5dJ1rUohHwHSGDs8wnOo9I6Jc2ECleLAewq9e8oBsx7rVT5VhY
+      MAIN_URL: https://postiz.vps.andrejvysny.sk
+      NEXT_PUBLIC_BACKEND_URL: https://postiz.vps.andrejvysny.sk/api
+      NEXT_PUBLIC_UPLOAD_DIRECTORY: /uploads
+      REDIS_URL: redis://services-stack_postiz-redis:6379
+      RUN_CRON: "true"
+      STORAGE_PROVIDER: local
+      UPLOAD_DIRECTORY: /uploads
+    image: ghcr.io/gitroomhq/postiz-app:latest
+    networks:
+      db-internal: null
+      postiz-internal: null
+      vps-public: null
+    volumes:
+      - type: volume
+        source: postiz-config
+        target: /config
+        volume: {}
+      - type: volume
+        source: postiz-uploads
+        target: /uploads
+        volume: {}
+  postiz-redis:
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+      placement:
+        constraints:
+          - node.role == manager
+    healthcheck:
+      test:
+        - CMD
+        - redis-cli
+        - ping
+      timeout: 3s
+      interval: 10s
+      retries: 10
+    image: redis:7.2
+    networks:
+      postiz-internal: null
+    volumes:
+      - type: volume
+        source: postiz-redis-data
+        target: /data
+        volume: {}
+  traefik:
+    command:
+      - --api.dashboard=true
+      - --api.insecure=false
+      - --providers.swarm=true
+      - --providers.swarm.exposedbydefault=false
+      - --providers.swarm.endpoint=unix:///var/run/docker.sock
+      - --providers.swarm.network=vps-public
+      - --providers.file.directory=/etc/traefik/dynamic
+      - --providers.file.watch=true
+      - --entrypoints.web.address=:80
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --entrypoints.web.http.redirections.entrypoint.permanent=true
+      - --entrypoints.websecure.address=:443
+      - --certificatesresolvers.letsencrypt.acme.email=vysnyandrej@gmail.com
+      - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
+      - --certificatesresolvers.letsencrypt.acme.tlschallenge=true
+      - --certificatesresolvers.letsencrypt.acme.caserver=https://acme-v02.api.letsencrypt.org/directory
+      - --log.level=INFO
+      - --accesslog=true
+      - --ping=true
+    deploy:
+      mode: global
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 2m0s
+      placement:
+        constraints:
+          - node.role == manager
+    healthcheck:
+      test:
+        - CMD
+        - traefik
+        - healthcheck
+        - --ping
+      timeout: 3s
+      interval: 30s
+      retries: 3
+    image: traefik:v3.6
+    networks:
+      vps-public: null
+    ports:
+      - mode: host
+        target: 80
+        published: "80"
+        protocol: tcp
+      - mode: host
+        target: 443
+        published: "443"
+        protocol: tcp
+    volumes:
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+        read_only: true
+        bind: {}
+      - type: volume
+        source: traefik-certificates
+        target: /letsencrypt
+        volume: {}
+      - type: bind
+        source: /mnt/data/traefik-dynamic
+        target: /etc/traefik/dynamic
+        read_only: true
+        bind: {}
+networks:
+  db-internal:
+    name: services_db-internal
+    driver: overlay
+  postiz-internal:
+    name: services_postiz-internal
+    driver: overlay
+  vps-public:
+    name: vps-public
+    external: true
+volumes:
+  n8n-data:
+    name: services_n8n-data
+    driver: local
+    driver_opts:
+      device: /mnt/data/n8n/files
+      o: bind
+      type: none
+  postgres-data:
+    name: services_postgres-data
+    driver: local
+    driver_opts:
+      device: /mnt/data/postgres/pg
+      o: bind
+      type: none
+  postiz-config:
+    name: services_postiz-config
+    driver: local
+    driver_opts:
+      device: /mnt/data/postiz/config
+      o: bind
+      type: none
+  postiz-redis-data:
+    name: services_postiz-redis-data
+    driver: local
+    driver_opts:
+      device: /mnt/data/postiz/redis
+      o: bind
+      type: none
+  postiz-uploads:
+    name: services_postiz-uploads
+    driver: local
+    driver_opts:
+      device: /mnt/data/postiz/uploads
+      o: bind
+      type: none
+  traefik-certificates:
+    name: services_traefik-certificates
+    driver: local
+    driver_opts:
+      device: /mnt/data/traefik-certificates
+      o: bind
+      type: none
+configs:
+  pg-init:
+    name: services_pg-init
+    file: /home/bot/clawd/workspaces/default/services/services/pg-init.sh

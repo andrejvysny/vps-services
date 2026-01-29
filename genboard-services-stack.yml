@@ -1,0 +1,339 @@
+# =============================================================================
+# GenBoard Services Stack for Docker Swarm
+# =============================================================================
+# Application services: Frontend, Backend, Database, Kafka, Kafka-UI
+#
+# Networks:
+#   - genboard-public: External overlay for Traefik routing
+#   - genboard-internal: Internal overlay for database/kafka access
+#
+# Deploy: docker stack deploy -c production/services-stack.yml services
+# =============================================================================
+
+services:
+
+  # ===========================================================================
+  # Web - Landing Page
+  # ===========================================================================
+  web:
+    image: ghcr.io/genboard-fiit/web:${WEB_TAG:-latest}
+    networks:
+      - genboard-public
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      mode: replicated
+      replicas: 1
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+        failure_action: rollback
+        monitor: 15s
+      rollback_config:
+        parallelism: 1
+        delay: 5s
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 60s
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.web.rule=Host(`genboard.sk`)"
+        - "traefik.http.routers.web.entrypoints=websecure"
+        - "traefik.http.routers.web.tls=true"
+        - "traefik.http.routers.web.tls.certresolver=letsencrypt"
+        - "traefik.http.routers.web.middlewares=security-headers@swarm,compress@swarm"
+        - "traefik.http.services.web.loadbalancer.server.port=80"
+        - "traefik.http.services.web.loadbalancer.healthcheck.path=/"
+        - "traefik.http.services.web.loadbalancer.healthcheck.interval=15s"
+
+  # ===========================================================================
+  # Frontend - Nuxt.js Application
+  # ===========================================================================
+  frontend:
+    image: ghcr.io/genboard-fiit/frontend:${FRONTEND_TAG:-latest}
+    networks:
+      - genboard-public
+      - genboard-internal
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3000
+      NUXT_PUBLIC_BACKEND_HOST: https://api.genboard.sk
+      NUXT_PUBLIC_API_VERSION: v1
+      NUXT_PUBLIC_OPEN_FETCH_API_BASE_URL: https://api.genboard.sk
+      SENTRY_DNS: ${SENTRY_DNS:-}
+    deploy:
+      mode: replicated
+      replicas: ${FRONTEND_REPLICAS:-1}
+      update_config:
+        parallelism: 1
+        delay: 20s
+        failure_action: rollback
+        order: start-first
+        monitor: 30s
+      rollback_config:
+        parallelism: 1
+        delay: 10s
+        order: stop-first
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.1'
+          memory: 128M
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.frontend.rule=Host(`app.genboard.sk`)"
+        - "traefik.http.routers.frontend.entrypoints=websecure"
+        - "traefik.http.routers.frontend.tls=true"
+        - "traefik.http.routers.frontend.tls.certresolver=letsencrypt"
+        - "traefik.http.routers.frontend.middlewares=security-headers@swarm,compress@swarm"
+        - "traefik.http.services.frontend.loadbalancer.server.port=3000"
+        - "traefik.http.services.frontend.loadbalancer.sticky.cookie=true"
+        - "traefik.http.services.frontend.loadbalancer.sticky.cookie.name=frontend"
+        - "traefik.http.services.frontend.loadbalancer.sticky.cookie.secure=true"
+        - "traefik.http.services.frontend.loadbalancer.healthcheck.path=/"
+        - "traefik.http.services.frontend.loadbalancer.healthcheck.interval=15s"
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000', (r) => {process.exit(r.statusCode >= 200 && r.statusCode < 500 ? 0 : 1)}).on('error', () => process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # ===========================================================================
+  # Backend - Symfony API
+  # ===========================================================================
+  backend:
+    image: ghcr.io/genboard-fiit/backend:${BACKEND_TAG:-latest}
+    networks:
+      - genboard-public
+      - genboard-internal
+    volumes:
+      # JWT keys persistence - prevents token invalidation on redeployment
+      # TODO: Replace with Docker secrets for proper secret management
+      - backend-jwt-keys:/var/www/config/jwt
+      - backend-storage:/var/genboard/storage
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    environment:
+      APP_ENV: prod
+      APP_DEBUG: 0
+      APP_SECRET: ${APP_SECRET:-ThisTokenIsNotSoSecretChangeIt}
+      GENBOARD_STORAGE_PATH: /var/genboard/storage
+      JWT_SECRET_KEY: "%kernel.project_dir%/config/jwt/private.pem"
+      JWT_PUBLIC_KEY: "%kernel.project_dir%/config/jwt/public.pem"
+      JWT_PASSPHRASE: ${JWT_PASSPHRASE:-ThisTokenIsNotSoSecretChangeIt}
+      DATABASE_URL: postgresql://${DB_USER:-user}:${DB_PASSWORD:-password}@database:5432/${DB_NAME:-app}?serverVersion=16&charset=utf8
+      DEFAULT_URI: https://api.genboard.sk
+      CORS_ALLOW_ORIGIN: "*" #'^https?://(genboard\.sk|app\.genboard\.sk)(:[0-9]+)?$$'
+      APP_URL: https://app.genboard.sk
+      MAILER_DSN: "smtp://noreply%40andrejvysny.sk:EWPobbWc8Gg%3FVR%3CS59S%40@smtp.m1.websupport.sk:465"
+      MAILER_FROM: noreply@andrejvysny.sk
+      KAFKA_BROKER_LIST: kafka:9092
+      KAFKA_CONSUMER_GROUP_ID: genboard-backend
+      KAFKA_TOPIC_EVENTS: genboard.events
+      LOG_RETENTION_DAYS: 30
+    deploy:
+      mode: replicated
+      replicas: ${BACKEND_REPLICAS:-1}
+      update_config:
+        parallelism: 1
+        delay: 20s
+        failure_action: rollback
+        order: start-first
+        monitor: 30s
+      rollback_config:
+        parallelism: 1
+        delay: 10s
+        order: stop-first
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.1'
+          memory: 128M
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.backend.rule=Host(`api.genboard.sk`)"
+        - "traefik.http.routers.backend.entrypoints=websecure"
+        - "traefik.http.routers.backend.tls=true"
+        - "traefik.http.routers.backend.tls.certresolver=letsencrypt"
+        - "traefik.http.routers.backend.middlewares=security-headers@swarm,compress@swarm,cors@swarm"
+        - "traefik.http.services.backend.loadbalancer.server.port=80"
+        - "traefik.http.services.backend.loadbalancer.sticky.cookie=true"
+        - "traefik.http.services.backend.loadbalancer.sticky.cookie.name=backend"
+        - "traefik.http.services.backend.loadbalancer.sticky.cookie.secure=true"
+        - "traefik.http.services.backend.loadbalancer.healthcheck.path=/health"
+        - "traefik.http.services.backend.loadbalancer.healthcheck.interval=15s"
+        - "traefik.http.services.backend.loadbalancer.healthcheck.timeout=5s"
+
+  # ===========================================================================
+  # Database - PostgreSQL
+  # ===========================================================================
+  database:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${DB_NAME:-app}
+      POSTGRES_USER: ${DB_USER:-user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-password}
+      PGDATA: /var/lib/postgresql/data/pgdata
+      POSTGRES_HOST_AUTH_METHOD: md5
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d ${DB_NAME:-app} -U ${DB_USER:-user} || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    networks:
+      - genboard-internal
+    stop_grace_period: 60s
+    deploy:
+      mode: replicated
+      replicas: 1
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: stop-first
+        failure_action: rollback
+        monitor: 30s
+      rollback_config:
+        parallelism: 1
+        delay: 10s
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.1'
+          memory: 128M
+
+  # ===========================================================================
+  # Kafka - Message Broker (KRaft mode)
+  # ===========================================================================
+  kafka:
+    image: apache/kafka:${KAFKA_VERSION:-latest}
+    hostname: kafka
+    user: root
+    environment:
+      KAFKA_EXTERNAL_HOST: genboard.sk
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: INTERNAL://:9092,EXTERNAL://:9094,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://genboard.sk:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    networks:
+      - genboard-internal
+      - genboard-public
+    ports:
+      - target: 9094
+        published: 9094
+        protocol: tcp
+        mode: host
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    stop_grace_period: 60s
+    deploy:
+      mode: replicated
+      replicas: 1
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: stop-first
+        failure_action: rollback
+        monitor: 60s
+      rollback_config:
+        parallelism: 1
+        delay: 10s
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 512M
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  genboard-public:
+    external: true
+
+  genboard-internal:
+    external: true
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  db-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/data/db-data
+  kafka-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/data/kafka-data
+  backend-jwt-keys:
+    driver: local
+  backend-storage:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/data/backend-storage

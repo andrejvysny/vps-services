@@ -1,0 +1,5 @@
+
+# Environment secrets (DO NOT COMMIT)
+.env
+.env.*
+!.env.example
